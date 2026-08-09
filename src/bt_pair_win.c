@@ -5,6 +5,8 @@
 
 #include "bt_pair.h"
 
+#include <stddef.h>
+
 char *bt_scan_devices(int timeout_ms)
 {
     (void)timeout_ms;
