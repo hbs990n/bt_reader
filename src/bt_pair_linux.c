@@ -93,11 +93,11 @@ static char *collect_devices(GDBusConnection *c)
 
     g_variant_iter_init(&it, root);
     while (g_variant_iter_loop(&it, "{oa{sa{sv}}}", &path, &ifaces)) {
-        GVariant *dev = NULL;
+        GVariant *dev = g_variant_lookup_value(ifaces, "org.bluez.Device1",
+                                               G_VARIANT_TYPE("a{sv}"));
         const char *addr = NULL;
         const char *name = NULL;
-        if (!g_variant_lookup_value(ifaces, "org.bluez.Device1",
-                                    G_VARIANT_TYPE("a{sv}"), &dev))
+        if (!dev)
             continue;
         g_variant_lookup(dev, "Address", "s", &addr);
         g_variant_lookup(dev, "Name", "s", &name);

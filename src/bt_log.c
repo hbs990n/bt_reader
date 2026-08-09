@@ -55,9 +55,9 @@ static void crash_handler(int sig)
     if (fd >= 0) {
         char buf[128];
         int len = snprintf(buf, sizeof(buf), "\n==== CRASH signal %d ====\n", sig);
-        write(fd, buf, (size_t)len);
+        (void)write(fd, buf, (size_t)len);
         backtrace_symbols_fd(frames, n, fd);
-        write(fd, "\n", 1);
+        (void)write(fd, "\n", 1);
         close(fd);
     }
     _exit(128 + sig);
