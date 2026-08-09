@@ -170,12 +170,59 @@ char *bt_scan_devices(int timeout_ms)
     return list;
 }
 
+/* 扫描一次并返回设备的对象路径，调用方 g_free */
+static char *scan_and_find(GDBusConnection *c, const char *mac, int timeout_ms)
+{
+    char *list;
+    char *path;
+
+    if (adapter_call(c, "StartDiscovery") < 0)
+        return NULL;
+    if (timeout_ms > 0)
+        wait_ms(timeout_ms);
+    adapter_call(c, "StopDiscovery");
+    list = collect_devices(c);
+    path = find_device_path(list, mac);
+    g_free(list);
+    return path;
+}
+
+static int pair_one(GDBusConnection *c, const char *path, char *errbuf, size_t errsz)
+{
+    GError *err = NULL;
+    GVariant *res = g_dbus_connection_call_sync(c, BT_BUS, path, "org.bluez.Device1", "Pair",
+        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 90000, NULL, &err);
+    if (!res) {
+        snprintf(errbuf, errsz, "%s", err ? err->message : "?");
+        g_clear_error(&err);
+        return -1;
+    }
+    g_variant_unref(res);
+    return 0;
+}
+
+static int remove_device(GDBusConnection *c, const char *path)
+{
+    GError *err = NULL;
+    GVariant *res = g_dbus_connection_call_sync(c, BT_BUS, BT_ADAPTER, "org.bluez.Adapter1",
+        "RemoveDevice", g_variant_new("(o)", path), NULL,
+        G_DBUS_CALL_FLAGS_NONE, 30000, NULL, &err);
+    if (!res) {
+        bt_log("RemoveDevice(%s) 失败: %s", path, err ? err->message : "?");
+        g_clear_error(&err);
+        return -1;
+    }
+    g_variant_unref(res);
+    bt_log("RemoveDevice(%s) 成功", path);
+    return 0;
+}
+
 int bt_pair_device(const char *mac, int timeout_ms)
 {
     GDBusConnection *c = get_conn();
-    char *list;
-    char *path;
+    char *path = NULL;
     int rc = -1;
+    int attempt;
 
     bt_log("配对请求: %s", mac);
     if (!c)
@@ -184,39 +231,49 @@ int bt_pair_device(const char *mac, int timeout_ms)
         g_object_unref(c);
         return -1;
     }
-    if (adapter_call(c, "StartDiscovery") < 0) {
-        g_object_unref(c);
-        return -1;
+
+    /* 先尝试在已知设备中找到路径（已配对/已知设备无需扫描） */
+    {
+        char *list = collect_devices(c);
+        path = find_device_path(list, mac);
+        g_free(list);
     }
-    if (timeout_ms > 0)
-        wait_ms(timeout_ms);
-    adapter_call(c, "StopDiscovery");
-
-    list = collect_devices(c);
-    path = find_device_path(list, mac);
-    g_free(list);
-
     if (!path) {
-        bt_log("未在扫描结果中找到 %s", mac);
+        bt_log("未在已知设备中找到 %s，开始扫描", mac);
+        path = scan_and_find(c, mac, timeout_ms);
+    }
+    if (!path) {
+        bt_log("未找到设备 %s", mac);
         g_object_unref(c);
         return -1;
     }
     bt_log("找到设备对象路径: %s", path);
 
-    {
-        GError *err = NULL;
-        GVariant *res = g_dbus_connection_call_sync(c, BT_BUS, path, "org.bluez.Device1", "Pair",
-            NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 90000, NULL, &err);
-        g_free(path);
-        if (!res) {
-            bt_log("Pair 失败: %s", err ? err->message : "?");
-            g_clear_error(&err);
-        } else {
+    for (attempt = 0; attempt < 2; attempt++) {
+        char emsg[512] = "";
+        if (pair_one(c, path, emsg, sizeof(emsg)) == 0) {
             bt_log("Pair 成功");
-            g_variant_unref(res);
             rc = 0;
+            break;
         }
+        bt_log("Pair 失败: %s", emsg);
+        if (!strstr(emsg, "AlreadyExists"))
+            break;
+
+        /* 已有配对记录（可能是手机端已删除的旧记录），移除后重新配对 */
+        bt_log("检测到已有配对记录，移除 %s 后重新配对", path);
+        remove_device(c, path);
+        g_free(path);
+        path = NULL;
+        path = scan_and_find(c, mac, timeout_ms);
+        if (!path) {
+            bt_log("移除旧配对后未能重新发现设备 %s", mac);
+            break;
+        }
+        bt_log("重新发现设备对象路径: %s", path);
     }
+
+    g_free(path);
     g_object_unref(c);
     return rc;
 }

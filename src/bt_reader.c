@@ -143,6 +143,7 @@ static gboolean scan_done(gpointer p)
     scan_data *d = p;
     GtkComboBoxText *c = GTK_COMBO_BOX_TEXT(combo_dev);
     int n = 0;
+    GString *out = g_string_new(NULL);
 
     gtk_combo_box_text_remove_all(c);
     if (d->list) {
@@ -151,18 +152,29 @@ static gboolean scan_done(gpointer p)
         for (line = strtok_r(d->list, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
             if (!*line)
                 continue;
-            char *tab = strchr(line, '\t');
+            char *tab1 = strchr(line, '\t');
+            char *tab2 = tab1 ? strchr(tab1 + 1, '\t') : NULL;
             const char *name = line;
-            const char *addr = tab ? tab + 1 : line;
-            if (tab)
-                *tab = '\0';
+            const char *addr = tab1 ? tab1 + 1 : line;
+            if (tab1)
+                *tab1 = '\0';
+            if (tab2)
+                *tab2 = '\0';
             char buf[256];
             snprintf(buf, sizeof(buf), "%s (%s)", *name ? name : addr, addr);
             gtk_combo_box_text_append_text(c, buf);
+            g_string_append_printf(out, "%s\t%s\n", addr, *name ? name : addr);
             n++;
         }
     }
-    set_status("扫描完成，发现 %d 个设备", n);
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(textview));
+    if (n > 0)
+        gtk_text_buffer_set_text(buf, out->str, -1);
+    else
+        gtk_text_buffer_set_text(buf, "（未发现设备）", -1);
+    g_string_free(out, TRUE);
+
+    set_status("扫描完成，发现 %d 个设备（下方文本框可复制）", n);
     bt_log("scan_done: 发现 %d 个设备", n);
     gtk_widget_set_sensitive(btn_scan, TRUE);
     gtk_widget_set_sensitive(btn_pair, TRUE);
