@@ -1,0 +1,193 @@
+/*
+ * bt_pair_linux.c — Linux BlueZ 系统级扫描/配对（D-Bus）
+ *
+ * 通过系统总线调用 org.bluez:
+ *   Adapter1.StartDiscovery / StopDiscovery
+ *   Device1.Pair
+ *   ObjectManager.GetManagedObjects 收集设备
+ */
+
+#define _GNU_SOURCE
+
+#include "bt_pair.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <gio/gio.h>
+
+#define BT_BUS      "org.bluez"
+#define BT_ADAPTER  "/org/bluez/hci0"
+#define BT_OM       "org.freedesktop.DBus.ObjectManager"
+#define BT_PROPS    "org.freedesktop.DBus.Properties"
+
+static GDBusConnection *get_conn(void)
+{
+    GError *err = NULL;
+    GDBusConnection *c = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &err);
+    if (!c) {
+        fprintf(stderr, "无法连接系统 D-Bus 总线: %s\n", err ? err->message : "?");
+        g_clear_error(&err);
+    }
+    return c;
+}
+
+static int set_powered(GDBusConnection *c, gboolean on)
+{
+    GError *err = NULL;
+    GVariant *res = g_dbus_connection_call_sync(c, BT_BUS, BT_ADAPTER, BT_PROPS, "Set",
+        g_variant_new("(ssv)", "org.bluez.Adapter1", "Powered", g_variant_new_boolean(on)),
+        G_VARIANT_TYPE("()"), G_DBUS_CALL_FLAGS_NONE, 30000, NULL, &err);
+    if (!res) {
+        g_clear_error(&err);
+        return -1;
+    }
+    g_variant_unref(res);
+    return 0;
+}
+
+static int adapter_call(GDBusConnection *c, const char *method)
+{
+    GError *err = NULL;
+    GVariant *res = g_dbus_connection_call_sync(c, BT_BUS, BT_ADAPTER, "org.bluez.Adapter1",
+        method, NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 30000, NULL, &err);
+    if (!res) {
+        g_clear_error(&err);
+        return -1;
+    }
+    g_variant_unref(res);
+    return 0;
+}
+
+static void wait_ms(int ms)
+{
+    gint64 end = g_get_monotonic_time() + (gint64)ms * 1000;
+    while (g_get_monotonic_time() < end)
+        g_usleep(100000);
+}
+
+/* 收集所有 Device1，返回 "名称\t地址\t对象路径\n..."，调用方 g_free */
+static char *collect_devices(GDBusConnection *c)
+{
+    GError *err = NULL;
+    GVariant *res = g_dbus_connection_call_sync(c, BT_BUS, "/", BT_OM, "GetManagedObjects",
+        NULL, G_VARIANT_TYPE("(a{oa{sa{sv}}})"), G_DBUS_CALL_FLAGS_NONE, 30000, NULL, &err);
+    if (!res) {
+        g_clear_error(&err);
+        return NULL;
+    }
+
+    GString *out = g_string_new(NULL);
+    GVariant *root = g_variant_get_child_value(res, 0);
+    GVariantIter it;
+    const char *path;
+    GVariant *ifaces;
+
+    g_variant_iter_init(&it, root);
+    while (g_variant_iter_loop(&it, "{oa{sa{sv}}}", &path, &ifaces)) {
+        GVariant *dev = NULL;
+        const char *addr = NULL;
+        const char *name = NULL;
+        if (!g_variant_lookup(ifaces, "org.bluez.Device1", "a{sv}", &dev))
+            continue;
+        g_variant_lookup(dev, "Address", "s", &addr);
+        g_variant_lookup(dev, "Name", "s", &name);
+        if (addr)
+            g_string_append_printf(out, "%s\t%s\t%s\n", name ? name : "", addr, path);
+    }
+
+    g_variant_unref(root);
+    g_variant_unref(res);
+    return g_string_free(out, FALSE);
+}
+
+static char *find_device_path(const char *list, const char *mac)
+{
+    if (!list || !mac)
+        return NULL;
+    char *copy = g_strdup(list);
+    char *save = NULL;
+    char *path = NULL;
+    char *line;
+    for (line = strtok_r(copy, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        if (!*line)
+            continue;
+        char *t1 = strchr(line, '\t');
+        if (!t1)
+            continue;
+        char *t2 = strchr(t1 + 1, '\t');
+        if (!t2)
+            continue;
+        *t2 = '\0';
+        if (strcasecmp(t1 + 1, mac) == 0) {
+            path = g_strdup(t2 + 1);
+            break;
+        }
+    }
+    g_free(copy);
+    return path;
+}
+
+char *bt_scan_devices(int timeout_ms)
+{
+    GDBusConnection *c = get_conn();
+    if (!c)
+        return NULL;
+    if (set_powered(c, TRUE) < 0) {
+        g_object_unref(c);
+        return NULL;
+    }
+    if (adapter_call(c, "StartDiscovery") < 0) {
+        g_object_unref(c);
+        return NULL;
+    }
+    if (timeout_ms > 0)
+        wait_ms(timeout_ms);
+    adapter_call(c, "StopDiscovery");
+    char *list = collect_devices(c);
+    g_object_unref(c);
+    return list;
+}
+
+int bt_pair_device(const char *mac, int timeout_ms)
+{
+    GDBusConnection *c = get_conn();
+    if (!c)
+        return -1;
+    if (set_powered(c, TRUE) < 0) {
+        g_object_unref(c);
+        return -1;
+    }
+    if (adapter_call(c, "StartDiscovery") < 0) {
+        g_object_unref(c);
+        return -1;
+    }
+    if (timeout_ms > 0)
+        wait_ms(timeout_ms);
+    adapter_call(c, "StopDiscovery");
+
+    char *list = collect_devices(c);
+    char *path = find_device_path(list, mac);
+    g_free(list);
+
+    if (!path) {
+        fprintf(stderr, "未发现设备 %s（请确认手机蓝牙已开启且可被发现）\n", mac);
+        g_object_unref(c);
+        return -1;
+    }
+
+    GError *err = NULL;
+    GVariant *res = g_dbus_connection_call_sync(c, BT_BUS, path, "org.bluez.Device1", "Pair",
+        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 90000, NULL, &err);
+    g_free(path);
+    if (!res) {
+        fprintf(stderr, "配对失败: %s\n", err ? err->message : "?");
+        g_clear_error(&err);
+        g_object_unref(c);
+        return -1;
+    }
+    g_variant_unref(res);
+    g_object_unref(c);
+    return 0;
+}
