@@ -7,6 +7,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(SOURCES
     src/bt_reader.c
     src/bt_link.c
+    src/bt_log.c
 )
 
 if(WIN32)

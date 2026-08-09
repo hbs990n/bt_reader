@@ -17,6 +17,8 @@
 #include <strings.h>
 #include <gio/gio.h>
 
+#include "bt_log.h"
+
 #define BT_BUS      "org.bluez"
 #define BT_ADAPTER  "/org/bluez/hci0"
 #define BT_OM       "org.freedesktop.DBus.ObjectManager"
@@ -27,6 +29,7 @@ static GDBusConnection *get_conn(void)
     GError *err = NULL;
     GDBusConnection *c = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &err);
     if (!c) {
+        bt_log("无法连接系统 D-Bus 总线: %s", err ? err->message : "?");
         fprintf(stderr, "无法连接系统 D-Bus 总线: %s\n", err ? err->message : "?");
         g_clear_error(&err);
     }
@@ -40,6 +43,7 @@ static int set_powered(GDBusConnection *c, gboolean on)
         g_variant_new("(ssv)", "org.bluez.Adapter1", "Powered", g_variant_new_boolean(on)),
         G_VARIANT_TYPE("()"), G_DBUS_CALL_FLAGS_NONE, 30000, NULL, &err);
     if (!res) {
+        bt_log("设置 Powered=%d 失败: %s", on, err ? err->message : "?");
         g_clear_error(&err);
         return -1;
     }
@@ -53,10 +57,12 @@ static int adapter_call(GDBusConnection *c, const char *method)
     GVariant *res = g_dbus_connection_call_sync(c, BT_BUS, BT_ADAPTER, "org.bluez.Adapter1",
         method, NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 30000, NULL, &err);
     if (!res) {
+        bt_log("adapter_call(%s) 失败: %s", method, err ? err->message : "?");
         g_clear_error(&err);
         return -1;
     }
     g_variant_unref(res);
+    bt_log("adapter_call(%s) 成功", method);
     return 0;
 }
 
@@ -83,6 +89,7 @@ static char *collect_devices(GDBusConnection *c)
     GVariantIter it;
     const char *path;
     GVariant *ifaces;
+    int count = 0;
 
     g_variant_iter_init(&it, root);
     while (g_variant_iter_loop(&it, "{oa{sa{sv}}}", &path, &ifaces)) {
@@ -93,9 +100,12 @@ static char *collect_devices(GDBusConnection *c)
             continue;
         g_variant_lookup(dev, "Address", "s", &addr);
         g_variant_lookup(dev, "Name", "s", &name);
-        if (addr)
+        if (addr) {
             g_string_append_printf(out, "%s\t%s\t%s\n", name ? name : "", addr, path);
+            count++;
+        }
     }
+    bt_log("collect_devices: 共 %d 个蓝牙设备", count);
 
     g_variant_unref(root);
     g_variant_unref(res);
@@ -132,6 +142,7 @@ static char *find_device_path(const char *list, const char *mac)
 char *bt_scan_devices(int timeout_ms)
 {
     GDBusConnection *c = get_conn();
+    char *list = NULL;
     if (!c)
         return NULL;
     if (set_powered(c, TRUE) < 0) {
@@ -142,10 +153,12 @@ char *bt_scan_devices(int timeout_ms)
         g_object_unref(c);
         return NULL;
     }
+    bt_log("扫描开始，时长 %d ms", timeout_ms);
     if (timeout_ms > 0)
         wait_ms(timeout_ms);
     adapter_call(c, "StopDiscovery");
-    char *list = collect_devices(c);
+    list = collect_devices(c);
+    bt_log("扫描结束，设备列表长度 %zu", list ? strlen(list) : 0);
     g_object_unref(c);
     return list;
 }
@@ -153,6 +166,11 @@ char *bt_scan_devices(int timeout_ms)
 int bt_pair_device(const char *mac, int timeout_ms)
 {
     GDBusConnection *c = get_conn();
+    char *list;
+    char *path;
+    int rc = -1;
+
+    bt_log("配对请求: %s", mac);
     if (!c)
         return -1;
     if (set_powered(c, TRUE) < 0) {
@@ -167,27 +185,31 @@ int bt_pair_device(const char *mac, int timeout_ms)
         wait_ms(timeout_ms);
     adapter_call(c, "StopDiscovery");
 
-    char *list = collect_devices(c);
-    char *path = find_device_path(list, mac);
+    list = collect_devices(c);
+    path = find_device_path(list, mac);
     g_free(list);
 
     if (!path) {
-        fprintf(stderr, "未发现设备 %s（请确认手机蓝牙已开启且可被发现）\n", mac);
+        bt_log("未在扫描结果中找到 %s", mac);
         g_object_unref(c);
         return -1;
     }
+    bt_log("找到设备对象路径: %s", path);
 
-    GError *err = NULL;
-    GVariant *res = g_dbus_connection_call_sync(c, BT_BUS, path, "org.bluez.Device1", "Pair",
-        NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 90000, NULL, &err);
-    g_free(path);
-    if (!res) {
-        fprintf(stderr, "配对失败: %s\n", err ? err->message : "?");
-        g_clear_error(&err);
-        g_object_unref(c);
-        return -1;
+    {
+        GError *err = NULL;
+        GVariant *res = g_dbus_connection_call_sync(c, BT_BUS, path, "org.bluez.Device1", "Pair",
+            NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 90000, NULL, &err);
+        g_free(path);
+        if (!res) {
+            bt_log("Pair 失败: %s", err ? err->message : "?");
+            g_clear_error(&err);
+        } else {
+            bt_log("Pair 成功");
+            g_variant_unref(res);
+            rc = 0;
+        }
     }
-    g_variant_unref(res);
     g_object_unref(c);
-    return 0;
+    return rc;
 }

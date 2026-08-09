@@ -22,6 +22,7 @@
 
 #include "bt_link.h"
 #include "bt_pair.h"
+#include "bt_log.h"
 
 #define DEFAULT_CHANNEL 1
 #define BUF_SIZE 8192
@@ -50,6 +51,7 @@ static int cli_main(int argc, char **argv)
     if (bt_init() != 0)
         return 1;
 
+    bt_log("cli_main: 连接 %s", mac);
     fd = bt_open(mac, DEFAULT_CHANNEL);
     if (fd < 0) {
         bt_cleanup();
@@ -161,6 +163,7 @@ static gboolean scan_done(gpointer p)
         }
     }
     set_status("扫描完成，发现 %d 个设备", n);
+    bt_log("scan_done: 发现 %d 个设备", n);
     gtk_widget_set_sensitive(btn_scan, TRUE);
     gtk_widget_set_sensitive(btn_pair, TRUE);
     return G_SOURCE_REMOVE;
@@ -170,7 +173,9 @@ static gpointer scan_worker(gpointer data)
 {
     (void)data;
     scan_data *d = g_new0(scan_data, 1);
+    bt_log("scan_worker: 开始扫描");
     d->list = bt_scan_devices(8000);
+    bt_log("scan_worker: 扫描返回 %s", d->list ? "有结果" : "空/NULL");
     g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, scan_done, d, scan_data_free);
     return NULL;
 }
@@ -213,7 +218,9 @@ static gboolean pair_done(gpointer p)
 static gpointer pair_worker(gpointer data)
 {
     pair_data *d = data;
+    bt_log("pair_worker: 配对 %s", d->addr);
     d->ok = bt_pair_device(d->addr, 8000);
+    bt_log("pair_worker: 配对结果 %d", d->ok);
     g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, pair_done, d, pair_data_free);
     return NULL;
 }
@@ -222,21 +229,25 @@ static void on_pair(GtkWidget *w, gpointer data)
 {
     (void)w;
     (void)data;
+    char addr[64] = {0};
     char *sel = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(combo_dev));
-    if (!sel) {
-        set_status("请先「扫描设备」并选择要配对的设备");
-        return;
+    if (sel) {
+        extract_addr(sel, addr, sizeof(addr));
+        g_free(sel);
     }
-    char addr[64];
-    extract_addr(sel, addr, sizeof(addr));
-    g_free(sel);
     if (!*addr) {
-        set_status("无法解析所选设备的 MAC");
+        const char *mac = gtk_entry_get_text(GTK_ENTRY(entry_mac));
+        strncpy(addr, mac, sizeof(addr) - 1);
+        addr[sizeof(addr) - 1] = '\0';
+    }
+    if (!*addr) {
+        set_status("请填写手机 MAC（或先扫描并选择设备）");
         return;
     }
     pair_data *d = g_new0(pair_data, 1);
     strncpy(d->addr, addr, sizeof(d->addr) - 1);
     set_status("正在配对 %s，请在手机上确认...", addr);
+    bt_log("on_pair: 发起配对 %s", addr);
     gtk_widget_set_sensitive(btn_pair, FALSE);
     gtk_widget_set_sensitive(btn_scan, FALSE);
     GThread *t = g_thread_new("pair", pair_worker, d);
@@ -275,6 +286,7 @@ static gpointer send_worker(gpointer data)
 {
     send_data *d = data;
     int fd = -1;
+    bt_log("send_worker: 连接 %s，文本 %zu 字节", d->mac, strlen(d->text));
     if (bt_init() == 0) {
         fd = bt_open(d->mac, DEFAULT_CHANNEL);
         if (fd >= 0) {
@@ -287,6 +299,7 @@ static gpointer send_worker(gpointer data)
     } else {
         d->rc = -3;
     }
+    bt_log("send_worker: 结果 rc=%d", d->rc);
     g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, send_done, d, send_data_free);
     return NULL;
 }
@@ -593,6 +606,8 @@ static int gui_win_main(void)
 
 int main(int argc, char **argv)
 {
+    bt_install_crash_handler();
+    bt_log("==== bt_reader 启动 ====");
     if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
         usage(argv[0]);
         return 0;
