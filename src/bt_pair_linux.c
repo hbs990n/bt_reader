@@ -96,7 +96,8 @@ static char *collect_devices(GDBusConnection *c)
         GVariant *dev = NULL;
         const char *addr = NULL;
         const char *name = NULL;
-        if (!g_variant_lookup(ifaces, "org.bluez.Device1", "a{sv}", &dev))
+        if (!g_variant_lookup_value(ifaces, "org.bluez.Device1",
+                                    G_VARIANT_TYPE("a{sv}"), &dev))
             continue;
         g_variant_lookup(dev, "Address", "s", &addr);
         g_variant_lookup(dev, "Name", "s", &name);
@@ -104,6 +105,7 @@ static char *collect_devices(GDBusConnection *c)
             g_string_append_printf(out, "%s\t%s\t%s\n", name ? name : "", addr, path);
             count++;
         }
+        g_variant_unref(dev);
     }
     bt_log("collect_devices: 共 %d 个蓝牙设备", count);
 
