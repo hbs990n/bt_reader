@@ -21,11 +21,12 @@
 5. 客户端断开后手机自动回到监听状态，可随时重连
 
 ## 实现要点
-在本地写代码，不用git,我手动上传到github仓库，用action编译
+在本地写代码,不用git,我手动上传到github仓库,用action编译
 ### Linux（BlueZ）
-- 头文件 `<bluetooth/bluetooth.h>`、`<bluetooth/rfcomm.h>`，链接 `-lbluetooth`（装 `libbluetooth-dev`）
-- `socket(AF_BLUETOOTH, SOCK_STREAM, BTPROTO_RFCOMM)`
-- `sockaddr_rc` 填手机 MAC + channel=1，`connect` 后 `write`
+- 头文件 `<bluetooth/bluetooth.h>`、`<bluetooth/rfcomm.h>`、`<bluetooth/sdp.h>`、`<bluetooth/sdp_lib.h>`，链接 `-lbluetooth`（装 `libbluetooth-dev`）
+- `socket(AF_BLUETOOTH, SOCK_STREAM, BTPROTO_RFCOMM)`、`sockaddr_rc` 填手机 MAC + channel、`connect` 后 `write`
+- **通道自动解析**：Android 分配 SPP 的 RFCOMM 通道不固定（本机实测为 4），不可硬编码。`bt_link.c` 已用 `sdp_service_search_attr_req` 按 SPP UUID (`0x1101`) 查询真实通道，SDP 失败才回退默认通道 1
+- 连接使用非阻塞 + poll，8 秒超时，避免失败时长时间阻塞
 
 ### Windows（Winsock）
 - `<winsock2.h>` `<ws2bth.h>`，链接 `ws2_32`、`Bthprops.lib`
