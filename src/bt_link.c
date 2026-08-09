@@ -80,9 +80,9 @@ void bt_cleanup(void)
 #endif
 }
 
+#ifdef _WIN32
 static int parse_mac_win(const char *str, BTH_ADDR *addr)
 {
-#ifdef _WIN32
     unsigned int b[6];
     int n = sscanf(str, "%2x:%2x:%2x:%2x:%2x:%2x",
                    &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
@@ -93,12 +93,8 @@ static int parse_mac_win(const char *str, BTH_ADDR *addr)
             ((BTH_ADDR)b[2] << 24) | ((BTH_ADDR)b[3] << 16) |
             ((BTH_ADDR)b[4] << 8)  | (BTH_ADDR)b[5];
     return 0;
-#else
-    (void)str;
-    (void)addr;
-    return -1;
-#endif
 }
+#endif
 
 int bt_open(const char *mac, int channel)
 {
