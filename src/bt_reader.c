@@ -27,6 +27,7 @@
 #else
 #include <unistd.h>
 #include <errno.h>
+#include <stdint.h>
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/rfcomm.h>
 #define CLOSE_SOCK close
@@ -70,6 +71,13 @@ static void print_sock_err(const char *what)
 /* ============ MAC 解析 ============ */
 
 #ifdef _WIN32
+/* SPP 服务 UUID: 00001101-0000-1000-8000-00805F9B34FB */
+static const GUID SPP_SVC_UUID = { 0x00001101, 0x0000, 0x1000,
+                                   { 0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB } };
+#ifndef BTH_PORT_ANY
+#define BTH_PORT_ANY 0
+#endif
+
 static int parse_mac(const char *str, BTH_ADDR *addr)
 {
     unsigned int b[6];
@@ -90,12 +98,13 @@ static int parse_mac(const char *str, BTH_ADDR *addr)
 static int open_conn(const char *mac_str, int channel)
 {
 #ifdef _WIN32
+    (void)channel;
     SOCKADDR_BTH addr;
     memset(&addr, 0, sizeof(addr));
     addr.addressFamily = AF_BTH;
     addr.btAddr = 0;
-    addr.serviceClassId = GUID_NULL;
-    addr.port = BTH_PORT_ANY; /* 0: SDP 查询 SPP UUID 自动解析 */
+    addr.serviceClassId = SPP_SVC_UUID; /* SDP 查询 SPP UUID 自动解析 */
+    addr.port = BTH_PORT_ANY;
 
     if (parse_mac(mac_str, &addr.btAddr) < 0) {
         fprintf(stderr, "MAC 格式错误: %s (应为 AA:BB:CC:DD:EE:FF)\n", mac_str);
