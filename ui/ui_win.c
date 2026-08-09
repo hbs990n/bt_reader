@@ -49,7 +49,7 @@ static HWND hBtnClip;
 
 static app_config g_cfg;
 static char g_clip_mac[64];  /* 开启剪切板朗读时锁定的 MAC */
-static int  g_clip_busy;     /* 上一文本尚未发送完时丢弃新文本 */
+static int  g_clip_gen;      /* 剪切板文本代数：新文本+1，旧发送任务过期作废 */
 
 /* ---- 通用小工具 ---- */
 
@@ -164,14 +164,44 @@ static void on_pair_click(void)
 typedef struct {
     char mac[64];
     char *text;
+    int gen;
     int rc;
 } wclip;
 
 static DWORD WINAPI wclip_worker(LPVOID p)
 {
     wclip *d = p;
-    bt_log("clipboard: 连接 %s，文本 %zu 字节", d->mac, strlen(d->text));
-    d->rc = bt_send_text(d->mac, d->text);
+    int fd = -1;
+
+    if (d->gen != g_clip_gen) {
+        bt_log("clipboard: 发送前发现已被新内容废除");
+        free(d->text);
+        free(d);
+        return 0;
+    }
+    if (bt_init() == 0) {
+        fd = bt_open(d->mac, BT_DEFAULT_CHANNEL);
+        if (fd >= 0) {
+            if (d->gen == g_clip_gen) {
+                bt_log("clipboard: 连接 %s，文本 %zu 字节", d->mac, strlen(d->text));
+                d->rc = bt_send_line(fd, d->text, strlen(d->text));
+            }
+        } else {
+            d->rc = -2; /* 连接失败 */
+        }
+        if (fd >= 0)
+            bt_close(fd);
+        bt_cleanup();
+    } else {
+        d->rc = -3; /* 初始化失败 */
+    }
+    if (d->gen != g_clip_gen) {
+        /* 发送期间又来了新文本：本次作废，不通知界面 */
+        bt_log("clipboard: 发送期间被新内容废除");
+        free(d->text);
+        free(d);
+        return 0;
+    }
     PostMessageW(hwnd, WM_APP_CLIP_DONE, (WPARAM)d, 0);
     return 0;
 }
@@ -179,30 +209,27 @@ static DWORD WINAPI wclip_worker(LPVOID p)
 static void on_clip_text(const char *text, void *userdata)
 {
     (void)userdata;
-    if (g_clip_busy) {
-        bt_log("clipboard: 上一文本仍在发送，跳过本次");
-        return;
-    }
     if (!*g_clip_mac) {
         bt_log("clipboard: 无有效 MAC，忽略");
         return;
     }
+    /* 新内容：作废所有旧文本的发送，永远以最新为准 */
+    g_clip_gen++;
     wclip *d = calloc(1, sizeof(*d));
     if (!d)
         return;
     strncpy(d->mac, g_clip_mac, sizeof(d->mac) - 1);
     d->mac[sizeof(d->mac) - 1] = '\0';
     d->text = _strdup(text);
-    g_clip_busy = 1;
+    d->gen = g_clip_gen;
     SetWindowTextW(hStatus, L"剪切板变化，正在连接手机...");
     {
         HANDLE th = CreateThread(NULL, 0, wclip_worker, d, 0, NULL);
-        if (!th) {
+        if (th) {
+            CloseHandle(th);
+        } else {
             free(d->text);
             free(d);
-            g_clip_busy = 0;
-        } else {
-            CloseHandle(th);
         }
     }
 }
@@ -235,6 +262,7 @@ static void apply_clip_config(void)
         }
     } else {
         clipboard_stop();
+        g_clip_gen = 0;
         g_cfg.clipboard_enabled = 0;
         config_save(&g_cfg);
         SetWindowTextW(hStatus, L"剪切板朗读已关闭");
@@ -318,11 +346,11 @@ static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
                                           : L"剪切板发送失败（请确认手机已开启「蓝牙朗读」且已配对）");
         free(d->text);
         free(d);
-        g_clip_busy = 0;
         return 0;
     }
     case WM_DESTROY:
         clipboard_stop();
+        g_clip_gen = 0;
         {
             char mac[64];
             get_mac_utf8(mac, sizeof(mac));

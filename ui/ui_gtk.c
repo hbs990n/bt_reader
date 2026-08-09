@@ -34,7 +34,7 @@ static GtkWidget *btn_clip;
 
 static app_config g_cfg;
 static char g_clip_mac[64];  /* 开启剪切板朗读时锁定的 MAC */
-static int  g_clip_busy;     /* 上一文本尚未发送完时丢弃新文本 */
+static int  g_clip_gen;      /* 剪切板文本代数：新文本+1，旧发送任务过期作废 */
 
 static void set_status(const char *fmt, ...)
 {
@@ -288,6 +288,7 @@ static void on_send(GtkWidget *w, gpointer data)
 typedef struct {
     char mac[64];
     char *text;
+    int gen;
     int rc;
 } clip_send_data;
 
@@ -301,26 +302,55 @@ static gboolean clip_done(gpointer p)
     bt_log("clipboard: 发送结果 rc=%d", d->rc);
     g_free(d->text);
     g_free(d);
-    g_clip_busy = 0;
     return G_SOURCE_REMOVE;
 }
 
 static gpointer clip_worker(gpointer data)
 {
     clip_send_data *d = data;
-    bt_log("clipboard: 连接 %s，文本 %zu 字节", d->mac, strlen(d->text));
-    d->rc = bt_send_text(d->mac, d->text);
+    int fd = -1;
+
+    if (d->gen != g_clip_gen) {
+        bt_log("clipboard: 发送前发现已被新内容废除");
+        g_free(d->text);
+        g_free(d);
+        return NULL;
+    }
+    if (bt_init() == 0) {
+        fd = bt_open(d->mac, BT_DEFAULT_CHANNEL);
+        if (fd >= 0) {
+            if (d->gen == g_clip_gen) {
+                bt_log("clipboard: 连接 %s，文本 %zu 字节", d->mac, strlen(d->text));
+                d->rc = bt_send_line(fd, d->text, strlen(d->text));
+            }
+        } else {
+            d->rc = -2; /* 连接失败 */
+        }
+        if (fd >= 0)
+            bt_close(fd);
+        bt_cleanup();
+    } else {
+        d->rc = -3; /* 初始化失败 */
+    }
+    if (d->gen != g_clip_gen) {
+        /* 发送期间又来了新文本：本次作废，不通知界面 */
+        bt_log("clipboard: 发送期间被新内容废除");
+        g_free(d->text);
+        g_free(d);
+        return NULL;
+    }
     g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, clip_done, d, NULL);
     return NULL;
 }
 
 /* 在主线程触发：开工作线程做连接+发送，避免阻塞 GUI */
-static void clip_send_text(const char *text)
+static void clip_send_text(const char *text, int gen)
 {
     clip_send_data *d = g_new0(clip_send_data, 1);
     strncpy(d->mac, g_clip_mac, sizeof(d->mac) - 1);
     d->mac[sizeof(d->mac) - 1] = '\0';
     d->text = g_strdup(text);
+    d->gen = gen;
     set_status("剪切板变化，正在连接手机...");
     GThread *t = g_thread_new("clip", clip_worker, d);
     g_thread_unref(t);
@@ -329,16 +359,13 @@ static void clip_send_text(const char *text)
 static void on_clip_text(const char *text, void *userdata)
 {
     (void)userdata;
-    if (g_clip_busy) {
-        bt_log("clipboard: 上一文本仍在发送，跳过本次");
-        return;
-    }
     if (!*g_clip_mac) {
         bt_log("clipboard: 无有效 MAC，忽略");
         return;
     }
-    g_clip_busy = 1;
-    clip_send_text(text);
+    /* 新内容：作废所有旧文本的发送，永远以最新为准 */
+    g_clip_gen++;
+    clip_send_text(text, g_clip_gen);
 }
 
 static void on_clip_toggled(GtkToggleButton *b, gpointer data)
@@ -365,6 +392,7 @@ static void on_clip_toggled(GtkToggleButton *b, gpointer data)
         }
     } else {
         clipboard_stop();
+        g_clip_gen = 0;
         g_cfg.clipboard_enabled = 0;
         config_save(&g_cfg);
         set_status("剪切板朗读已关闭");
@@ -391,6 +419,7 @@ static void on_win_destroy(GtkWidget *w, gpointer data)
     (void)w;
     (void)data;
     clipboard_stop();
+    g_clip_gen = 0;
     strncpy(g_cfg.mac, gtk_entry_get_text(GTK_ENTRY(entry_mac)), sizeof(g_cfg.mac) - 1);
     g_cfg.mac[sizeof(g_cfg.mac) - 1] = '\0';
     config_save(&g_cfg);
