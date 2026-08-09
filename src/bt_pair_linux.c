@@ -86,26 +86,31 @@ static char *collect_devices(GDBusConnection *c)
 
     GString *out = g_string_new(NULL);
     GVariant *root = g_variant_get_child_value(res, 0);
-    GVariantIter it;
-    const char *path;
-    GVariant *ifaces;
+    gsize n = g_variant_n_children(root);
+    bt_log("collect_devices: GetManagedObjects 返回 %zu 个对象", n);
     int count = 0;
 
-    g_variant_iter_init(&it, root);
-    while (g_variant_iter_loop(&it, "{oa{sa{sv}}}", &path, &ifaces)) {
+    for (gsize i = 0; i < n; i++) {
+        GVariant *obj = g_variant_get_child_value(root, i);   /* {oa{sa{sv}}} */
+        GVariant *pv = g_variant_get_child_value(obj, 0);     /* o */
+        GVariant *ifaces = g_variant_get_child_value(obj, 1); /* a{sa{sv}} */
+        const char *path = g_variant_get_string(pv, NULL);
         GVariant *dev = g_variant_lookup_value(ifaces, "org.bluez.Device1",
                                                G_VARIANT_TYPE("a{sv}"));
         const char *addr = NULL;
         const char *name = NULL;
-        if (!dev)
-            continue;
-        g_variant_lookup(dev, "Address", "s", &addr);
-        g_variant_lookup(dev, "Name", "s", &name);
-        if (addr) {
-            g_string_append_printf(out, "%s\t%s\t%s\n", name ? name : "", addr, path);
-            count++;
+        if (dev) {
+            g_variant_lookup(dev, "Address", "s", &addr);
+            g_variant_lookup(dev, "Name", "s", &name);
+            if (addr) {
+                g_string_append_printf(out, "%s\t%s\t%s\n", name ? name : "", addr, path);
+                count++;
+            }
+            g_variant_unref(dev);
         }
-        g_variant_unref(dev);
+        g_variant_unref(ifaces);
+        g_variant_unref(pv);
+        g_variant_unref(obj);
     }
     bt_log("collect_devices: 共 %d 个蓝牙设备", count);
 
