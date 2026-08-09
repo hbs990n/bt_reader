@@ -50,26 +50,12 @@ static int extract_rfcomm_channel(sdp_record_t *rec)
     sdp_list_t *protos = NULL;
     int channel = -1;
 
-    if (sdp_get_access_protos(rec, &protos) != 0)
-        return -1;
-    for (sdp_list_t *l = protos; l; l = l->next) {
-        sdp_list_t *proto = (sdp_list_t *)l->data;
-        int saw_rfcomm = 0;
-        for (sdp_list_t *d = proto; d; d = d->next) {
-            sdp_data_t *attr = (sdp_data_t *)d->data;
-            if (attr->dtd == SDP_UUID16 && attr->val.uuid16 == SDP_UUID_PROTOCOL_RFCOMM) {
-                saw_rfcomm = 1;
-                continue;
-            }
-            if (saw_rfcomm && attr->dtd == SDP_UINT8) {
-                channel = attr->val.uint8;
-                break;
-            }
-        }
-        if (channel > 0)
-            break;
+    if (sdp_get_access_protos(rec, &protos) == 0) {
+        int port = sdp_get_proto_port(protos, RFCOMM_UUID);
+        if (port > 0)
+            channel = port;
+        sdp_list_free(protos, 0);
     }
-    sdp_list_free(protos, 0);
     return channel;
 }
 
@@ -84,7 +70,7 @@ static int resolve_spp_channel(const bdaddr_t *dst)
 
     if (!session)
         return -1;
-    sdp_uuid16_create(&svc, SDP_UUID_SERIAL_PORT);
+    sdp_uuid16_create(&svc, SERIAL_PORT_SVCLASS_ID);
     search = sdp_list_append(NULL, &svc);
     attrs = sdp_list_append(NULL, &range);
     if (sdp_service_search_attr_req(session, search, SDP_ATTR_REQ_RANGE, attrs, &recs) == 0) {
