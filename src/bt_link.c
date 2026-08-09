@@ -23,8 +23,12 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdint.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/rfcomm.h>
+#include <bluetooth/sdp.h>
+#include <bluetooth/sdp_lib.h>
 #define CLOSE_SOCK close
 #define SOCKET int
 #define INVALID_SOCKET (-1)
@@ -38,6 +42,69 @@ static const GUID SPP_SVC_UUID = { 0x00001101, 0x0000, 0x1000,
 #ifndef BTH_PORT_ANY
 #define BTH_PORT_ANY 0
 #endif
+#else
+#define CONNECT_TIMEOUT_MS 8000
+/* 从 SDP 服务记录里提取 RFCOMM 通道号 */
+static int extract_rfcomm_channel(sdp_record_t *rec)
+{
+    sdp_list_t *protos = NULL;
+    int channel = -1;
+
+    if (sdp_get_access_protos(rec, &protos) != 0)
+        return -1;
+    for (sdp_list_t *l = protos; l; l = l->next) {
+        sdp_list_t *proto = (sdp_list_t *)l->data;
+        int saw_rfcomm = 0;
+        for (sdp_list_t *d = proto; d; d = d->next) {
+            sdp_data_t *attr = (sdp_data_t *)d->data;
+            if (attr->dtd == SDP_UUID16 && attr->val.uuid16 == SDP_UUID_PROTOCOL_RFCOMM) {
+                saw_rfcomm = 1;
+                continue;
+            }
+            if (saw_rfcomm && attr->dtd == SDP_UINT8) {
+                channel = attr->val.uint8;
+                break;
+            }
+        }
+        if (channel > 0)
+            break;
+    }
+    sdp_list_free(protos, 0);
+    return channel;
+}
+
+/* SDP 查询对方 SPP (Serial Port) 服务，返回真实 RFCOMM 通道号；失败 -1 */
+static int resolve_spp_channel(const bdaddr_t *dst)
+{
+    sdp_session_t *session = sdp_connect(BDADDR_ANY, dst, SDP_RETRY_IF_BUSY);
+    uuid_t svc;
+    sdp_list_t *search, *attrs, *recs = NULL;
+    uint32_t range = 0x0000ffff;
+    int channel = -1;
+
+    if (!session)
+        return -1;
+    sdp_uuid16_create(&svc, SDP_UUID_SERIAL_PORT);
+    search = sdp_list_append(NULL, &svc);
+    attrs = sdp_list_append(NULL, &range);
+    if (sdp_service_search_attr_req(session, search, SDP_ATTR_REQ_RANGE, attrs, &recs) == 0) {
+        for (sdp_list_t *r = recs; r; r = r->next) {
+            sdp_record_t *rec = (sdp_record_t *)r->data;
+            int ch = extract_rfcomm_channel(rec);
+            if (ch > 0) {
+                channel = ch;
+                break;
+            }
+        }
+        for (sdp_list_t *r = recs; r; r = r->next)
+            sdp_record_free((sdp_record_t *)r->data);
+        sdp_list_free(recs, 0);
+    }
+    sdp_list_free(search, 0);
+    sdp_list_free(attrs, 0);
+    sdp_close(session);
+    return channel;
+}
 #endif
 
 static int g_initialized = 0;
@@ -125,24 +192,71 @@ int bt_open(const char *mac, int channel)
     return (int)s;
 #else
     struct sockaddr_rc addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.rc_family = AF_BLUETOOTH;
-    addr.rc_channel = (uint8_t)channel;
+    bdaddr_t dst;
+    int s;
+    int chan = -1;
 
-    if (str2ba(mac, &addr.rc_bdaddr) < 0) {
+    if (str2ba(mac, &dst) < 0) {
         fprintf(stderr, "MAC 格式错误: %s (应为 AA:BB:CC:DD:EE:FF)\n", mac);
         return -1;
     }
 
-    int s = socket(AF_BLUETOOTH, SOCK_STREAM, BTPROTO_RFCOMM);
+    /* 优先通过 SDP 解析 SPP 服务的真实 RFCOMM 通道（Android 分配的不一定是 1） */
+    chan = resolve_spp_channel(&dst);
+    if (chan < 0)
+        chan = (uint8_t)channel; /* SDP 不可用时退回默认通道 */
+    fprintf(stderr, "SPP 通道: %d\n", chan);
+
+    memset(&addr, 0, sizeof(addr));
+    addr.rc_family = AF_BLUETOOTH;
+    addr.rc_channel = (uint8_t)chan;
+    addr.rc_bdaddr = dst;
+
+    s = socket(AF_BLUETOOTH, SOCK_STREAM, BTPROTO_RFCOMM);
     if (s < 0) {
         print_sock_err("socket(AF_BLUETOOTH) 失败(请安装 libbluetooth-dev)");
         return -1;
     }
-    if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        print_sock_err("连接失败(请确认手机已开启「蓝牙朗读」并已配对)");
-        close(s);
-        return -1;
+    /* 非阻塞 + poll，限制连接超时，避免失败时阻塞几十秒 */
+    {
+        int flags = fcntl(s, F_GETFL, 0);
+        if (flags < 0)
+            flags = 0;
+        fcntl(s, F_SETFL, flags | O_NONBLOCK);
+        if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            if (errno == EINPROGRESS || errno == EAGAIN) {
+                struct pollfd pfd;
+                int r;
+                pfd.fd = s;
+                pfd.events = POLLOUT;
+                pfd.revents = 0;
+                r = poll(&pfd, 1, CONNECT_TIMEOUT_MS);
+                if (r > 0) {
+                    int soerr = 0;
+                    socklen_t elen = sizeof(soerr);
+                    if (getsockopt(s, SOL_SOCKET, SO_ERROR, &soerr, &elen) == 0 && soerr == 0) {
+                        /* 连接成功 */
+                    } else {
+                        print_sock_err("连接失败(请确认手机已开启「蓝牙朗读」并已配对)");
+                        fcntl(s, F_SETFL, flags);
+                        close(s);
+                        return -1;
+                    }
+                } else {
+                    fprintf(stderr, "连接超时(%d 秒)，请确认手机已开启「蓝牙朗读」且 SPP 服务在监听\n",
+                            CONNECT_TIMEOUT_MS / 1000);
+                    fcntl(s, F_SETFL, flags);
+                    close(s);
+                    return -1;
+                }
+            } else {
+                print_sock_err("连接失败(请确认手机已开启「蓝牙朗读」并已配对)");
+                fcntl(s, F_SETFL, flags);
+                close(s);
+                return -1;
+            }
+        }
+        fcntl(s, F_SETFL, flags);
     }
     return s;
 #endif
